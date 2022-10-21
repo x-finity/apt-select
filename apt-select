@@ -1,0 +1,186 @@
+#!/bin/bash
+#set -x
+DEBUG="false"
+NETSELECT=$(which netselect)
+
+function ProgressBar {
+	#thx https://github.com/fearside/ProgressBar
+	let _progress=(${1}*100/${2}*100)/100
+	let _done=(${_progress}*4)/10
+	let _left=40-$_done
+	_done=$(printf "%${_done}s")
+	_left=$(printf "%${_left}s")
+	printf "\r\tProgress : [${_done// /#}${_left// /-}] ${_progress}%% (${1}/${2})"
+}
+
+function urlcheck {
+	url="${1}"
+	TFILE="${2}"
+	echo "$url" | grep -q "ubuntu-ports" && url2="" || url2=$(echo "$url" | sed 's~/ubuntu[^/|^\.]*/$~/ubuntu-ports/~')
+	if timeout 3s curl --retry 1 --retry-delay 0 --retry-all-errors -sI --connect-timeout 1 --url "${url}dists/$DIST/main/binary-$ARCH/Release" | grep -q "^HTTP[^ ]* 200"; then
+		echo "$url" >> "$TFILE"
+	elif [ "$ARCH" != "amd64" ] && [[ -n "$url2" ]]; then
+		if timeout 3s curl --retry 1 --retry-delay 0 --retry-all-errors -sI --connect-timeout 1 --url "${url2}dists/$DIST/main/binary-$ARCH/Release" | grep -q "^HTTP[^ ]* 200" ; then
+			echo "$url2" >> "$TFILE"
+		fi
+	fi
+}
+
+function inst_netselect {
+	[ "`id -u`" -gt 0 ] && echo "No netselect found, you need to be root to run $0 and install netselect" && exit 1
+	ARCH="${1}"
+	TMPPREFIX="${2}"
+	echo "No netselect found, downloading netselect in ${TMPPREFIX}/netselect.deb"
+	if [ "$ARCH" = "amd64" ]; then
+		wget http://ftp.debian.org/debian/pool/main/n/netselect/netselect_0.3.ds1-29_amd64.deb -O "${TMPPREFIX}"/netselect.deb
+	elif [ "$ARCH" = "arm64" ]; then
+		wget http://ftp.debian.org/debian/pool/main/n/netselect/netselect_0.3.ds1-29_arm64.deb -O "${TMPPREFIX}"/netselect.deb
+	elif [ "$ARCH" = "armhf" ]; then
+		wget http://ftp.debian.org/debian/pool/main/n/netselect/netselect_0.3.ds1-29_armhf.deb -O "${TMPPREFIX}"/netselect.deb
+	fi
+	echo "Installing netselect"
+	apt install "${TMPPREFIX}"/netselect.deb
+	rm "${TMPPREFIX}"/netselect.deb
+
+}
+
+function helpfunc {
+	ARCH="${1}"
+	echo -e "Usage: apt-select [args..]\n Args:"
+	[ "$ARCH" = "ubuntu" ] && echo -e "\t-l  --local\t\tCountry dependent source list (default)"
+	[ "$ARCH" = "ubuntu" ] && echo -e "\t-a  --all\t\tCountry independent source list"
+	echo -e "\t-s  --servers\t\tNumber of mirrors to display (default: 5)"
+	echo -e "\t-v  --verbose\t\tPrint debug info"
+	echo -e "\t-t  --threads\t\tNumber of threads to use (default: coresX4, overrides threads-max)"
+	echo -e "\t-tm --threads-max\tMax number of threads to use (default: 32)"
+}
+
+case `uname -m` in
+	aarch64) ARCH="arm64";;
+	x86_64) ARCH="amd64";;
+	arm*) ARCH="armhf";;
+	*) echo "arch not detected!" && exit 1;;
+esac
+
+if [ -n "$TMP" ]; then
+	TMPPREFIX="$TMP"
+elif [ -n "$TMPDIR" ]; then
+	TMPPREFIX="$TMPDIR"
+elif [ -z "$TMPPREFIX" ]; then
+	TMPPREFIX="/tmp"
+fi
+
+which lsb_release >/dev/null && OS=`lsb_release -is` && OS=${OS,,} || OS="unknown"
+if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
+	DIST=`lsb_release -cs`
+else
+	echo "Only for Debian/Ubuntu" && exit 1
+fi
+
+[ -z "$NETSELECT" ] && inst_netselect "$ARCH" "$TMPPREFIX"
+
+if [ "`id -u`" -gt 0 ] ; then
+	# If we are not, is netselect setuid?
+	if [ ! -u "$NETSELECT" ]; then
+		echo "Sorry, you need to be root to run $0 since the netselect"
+		echo "binary we will use ($NETSELECT) is not setuid."
+		exit 1
+	fi
+fi
+
+if [[ "$#" -gt 0 ]]; then
+skip="false"
+	for args; do
+		$skip && skip="false" && shift && set -- "$@" && continue
+		if [ "${args:0:1}" = '-' ]; then
+			if [ "${args:0:2}" = '--' ]; then
+				curarg="${args:2}"
+			else
+				curarg="${args:1}"
+			fi
+			case "$curarg" in
+				threads-max|tmax)
+					if [ -z "$TRDMAX" ]; then if [ "$2" -eq "$2" ] &>- ; then
+						TRDMAX="$2" && skip="true"; else echo "threads-max value must be a number!" && exit 1; fi
+					else echo "threads-max already set! Using first value: $TRDMAX";fi ;;
+				threads|t)
+					if [ -z "$TRD" ]; then if [ "$2" -eq "$2" ] &>- ; then
+						TRD="$2" && skip="true"; else echo "threads value must be a number!" && exit 1; fi
+					else echo "threads already set! Using first value: $TRD";fi ;;
+				servers|s)
+					if [ -z "$N" ]; then if [ "$2" -eq "$2" ] &>- ; then
+						N="$2" && skip="true"; else echo "servers value must be a number!" && exit 1; fi
+					else echo "servers already set! Using first value: $N";fi ;;
+				local|l) if [ -z "$SRC" ]; then SRC="local"; else echo "source already set! Using first value: $SRC";fi ;;
+				all|a) if [ -z "$SRC" ]; then SRC="all"; else echo "source already set! Using first value: $SRC";fi ;;
+				verbose|v) DEBUG="true" ;;
+				help|h) helpfunc "$OS" && exit 0 ;;
+				*) echo -e "Unknown argument $curarg\nUse $0 -h for help" && exit 1 ;;
+			esac
+		fi
+		shift
+		set -- "$@"
+	done
+else
+	echo -e "No args! Using defaults\nUse $0 -h for help"
+fi
+$DEBUG && echo "Args: $@"
+$DEBUG && echo -e "arch $ARCH\tos $OS"
+[ -z "$N" ] && N="5"
+[ -z "$SRC" ] && SRC="local"
+if [ -z "$TRD" ]; then
+	[ -z "$TRDMAX" ] && TRDMAX=32
+	which nproc >/dev/null && TRDCORES=`nproc` || TRDCORES=`cat /proc/cpuinfo | grep processor | wc -l`
+	[ "$TRDCORES" -gt "0" ] 2>/dev/null && TRD=$((TRDCORES*4)) || TRD="4"
+fi
+[ -n "$TRDMAX" ] && [ "$TRD" -gt "$TRDMAX" ] && TRD="$TRDMAX"
+
+if [ "$OS" = "ubuntu" ]; then
+	echo -n "Fetching urls:"
+	if [ "$SRC" = "local" ]; then
+		[ "$ARCH" = "amd64" ] && mir2=`curl -fsSL http://mirrors.ubuntu.com/mirrors.txt` || mir2="http://ports.ubuntu.com/"
+	elif [ "$SRC" = "all" ]; then
+		mir3=`curl -fsSL https://launchpad.net/ubuntu/+archivemirrors | grep --color=none -E -B8 'statusUP|statusSIX' | grep --color=none -o -E "http[s]?:\/\/[^\ |^\"]*"`
+		mir2=`echo "$mir3" | sort -h | uniq`
+	fi
+	echo -e "\t\t\tdone"
+	echo "Processing urls:"
+	$DEBUG && echo "Working in $TRD threads ($TRDCORES cores $([ -n "$TRDMAX" ] && echo -n "/ ${TRDMAX} max" || echo -n "/ max not set"))"
+	TFILE=$(mktemp -p "$TMPPREFIX" apt-select.XXX) && $DEBUG && echo "tmp file is $TFILE"
+	totalurl=$(echo "$mir2" | wc -l) && cururl=0
+	trap "rm -f $TFILE; exit 1" 1 2 3 15
+	while read -r url; do
+		((cururl++))
+		while [[ `jobs | wc -l` -ge "$TRD" ]]; do wait -n `jobs -p | sed -n 1p`; done
+		$DEBUG && echo "$cururl/$totalurl $(echo "$cururl*100/$totalurl" | bc)% $url" || ProgressBar "$cururl" "$totalurl"
+		urlcheck "$url" "$TFILE" &
+	done <<< "$mir2"
+	$DEBUG || echo
+	for wt in `seq 3`; do sleep 1; if [[ `jobs -p | wc -l` -eq 0 ]]; then break; fi; done
+	if [ "$wt" -eq 3 ]; then for job in `jobs -p`; do kill -9 "$job" &>- ; done; fi &>-
+	$DEBUG && echo -e "We got:\n$(cat $TFILE | sort -h | uniq)"
+	mir="$(cat "$TFILE" | sort | uniq)"
+elif [ "$OS" = "debian" ]; then
+	mir2="$(curl -s https://www.debian.org/mirror/list | awk -vN=2 '/Complete List of Mirrors/{++n} /Number of sites listed/{n=2} n>=N' | grep --color=none -A1 href | sed 's~<td valign="top"><a rel="nofollow" href="~~g' | sed 's~">.*</a></td>$~~g' | sed 's~<td valign="top">~~g' | sed 's~</td>~~g')"
+	n=0
+	mir="$(while read -r line; do
+		if [ "$line" = "--" ]; then
+			n=1
+		else
+			if [ "$n" = "1" ]; then
+				HREF="$line"
+				n=$((n+1))
+			elif [ "$n" = "2" ]; then
+				echo "$line" | grep -qi "$ARCH" && echo "$HREF"
+				n=0
+			fi
+		fi
+	done <<< "$mir2")"
+fi
+#set -x
+[[ -z "$mir" ]] && echo "Got no mirrors" && exit 1
+mirN=$(echo "$mir" | wc -l)
+if [ "$N" -gt "$mirN" ]; then echo "Got only $mirN mirrors, printing all"; N="$mirN"; else echo "Got $mirN mirrors, listing $N"; $DEBUG && echo $mir && echo; fi
+netselect -s "$N" $mir
+rm "$TFILE"
+#set +x
